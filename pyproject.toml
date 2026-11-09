@@ -1,0 +1,147 @@
+[project]
+name = "WeClone"
+version = "1.0.4"
+description = "Build a portrait of your life. Assistants that know you. Clones that talk like you."
+authors = [{ name = "xming521" }]
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+  "cryptography>=44.0.0",
+  "filelock>=3.16.0",
+  "pandas",
+  "pyjson5",
+  "omegaconf",
+  "click",
+  "tqdm",
+  "rich",
+  "pydantic==2.10.6",
+  "setuptools>=78.1.0",
+  "loguru>=0.7.3",
+  "langchain",
+  "openai==1.87.0",
+  # httpx reads proxies from the environment, and ALL_PROXY often names a SOCKS one: the socks extra handles it, and
+  # 0.28 is the first httpx to take socks5h://.
+  "httpx[socks]>=0.28",
+  "fastapi",
+  "uvicorn",
+  "tiktoken",
+  "tokenizers",
+  "pip",
+]
+
+[tool.weclone]
+# Configuration file version number. This number should be incremented when the configuration file structure or important default values change.
+config_version = "1.0.1"
+
+[dependency-groups]
+main = [
+  "llamafactory==0.9.4",
+  "vllm==0.10.0; platform_system == 'Linux'",
+  "torch==2.7.1+cu126; platform_system == 'Linux' or platform_system == 'Windows'",
+  "torchvision==0.22.1+cu126; platform_system == 'Linux' or platform_system == 'Windows'",
+  "torchaudio==2.7.1+cu126; platform_system == 'Linux' or platform_system == 'Windows'",
+  "torchdata>=0.10.0; platform_system == 'Linux' or platform_system == 'Windows'",
+  "transformers==4.53.2",
+  "accelerate==1.7.0",
+  "triton==3.3.1; platform_system == 'Linux'",
+  "presidio_analyzer[transformers]",
+  "presidio_anonymizer",
+]
+# LTP 4.2 calls batch_encode_plus, which transformers 5 removed.
+style = ["ltp==4.2.14", "scipy", "transformers<5"]
+sparktts = [
+  "einops>=0.8.1",
+  "einx>=0.3.0",
+  "numpy==1.26.4",
+  "omegaconf>=2.3.0",
+  "packaging>=24.2",
+  "safetensors>=0.5.2",
+  "soundfile>=0.12.1",
+  "soxr>=0.5.0.post1",
+  "torchaudio>=2.6.0",
+  "tqdm>=4.66.5",
+]
+
+dev = ["pytest", "pytest-order", "pyright", "ruff", "pre-commit"]
+
+[project.scripts]
+weclone-cli = "weclone.cli:cli"
+
+[tool.uv]
+package = false
+
+[tool.uv.pip]
+torch-backend = "auto"
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu126", marker = "platform_system == 'Windows'" },
+  { index = "pytorch-cu126", marker = "platform_system == 'Linux'" },
+]
+torchaudio = [
+  { index = "pytorch-cu126", marker = "platform_system == 'Windows'" },
+  { index = "pytorch-cu126", marker = "platform_system == 'Linux'" },
+]
+torchvision = [
+  { index = "pytorch-cu126", marker = "platform_system == 'Windows'" },
+  { index = "pytorch-cu126", marker = "platform_system == 'Linux'" },
+]
+triton = [
+  { index = "pytorch-cu126", marker = "platform_system == 'Windows'" },
+  { index = "pytorch-cu126", marker = "platform_system == 'Linux'" },
+]
+torchdata = [
+  { index = "pytorch-cu126", marker = "platform_system == 'Windows'" },
+  { index = "pytorch-cu126", marker = "platform_system == 'Linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.setuptools.packages.find]
+where = ["."]                      
+include = ["weclone*"]             
+exclude = ["*tests*", "*archive*", "weclone-cloud*"]
+
+[tool.setuptools.package-data]
+"weclone.web" = ["dist/*", "dist/assets/*"]
+"weclone.core.inference" = ["model_prices.json"]
+
+[tool.pyright]
+typeCheckingMode = "basic"
+include = ["weclone/data"]
+exclude = ["**/archive", "**/tests"]
+ignore = ["**/archive"]
+
+reportMissingImports = "error"
+reportMissingTypeStubs = true
+
+pythonVersion = "3.12"
+pythonPlatform = "Linux"
+
+[tool.ruff]
+exclude = [
+  "**/archive",
+  "**/tests",
+  "weclone-audio/src/server未完工",
+  "weclone-audio/src/Spark-TTS",
+]
+line-length = 110
+
+lint.ignore = ["F403", "F405", "E501", "E402"]
+lint.select = [
+  "F",     # Pyflakes
+  "W",     # pycodestyle warnings
+  "E",     # pycodestyle errors
+  "ASYNC", # flake8-async
+  "C4",    # flake8-comprehensions
+  "Q",     # flake8-quotes
+]
+target-version = "py312"
+
+[tool.pytest.ini_options]
+addopts = "-x -v -s --tb=short -m 'not e2e'"
+markers = ["e2e: full SFT pipeline on a GPU with the local models named in tests/configs; run with -m e2e"]

